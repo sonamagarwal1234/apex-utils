@@ -1,0 +1,65 @@
+# Unique name for this workflow
+name: prodBuild
+
+# Definition when the workflow should run
+on:
+    push:
+        tags: releases/[1-9]+.[0-9]+.[0-9]+
+        paths-ignore:
+            - 'sfdx-project.json'
+            - 'README.md'
+            - 'build.yml'
+            - 'devDeploy.yml'
+            - 'devSrovnBuild.yml'
+            - 'devSrovnDeploy.yml'
+            - 'stagingBuild.yml'
+            - 'stagingDeploy.yml'
+
+# Jobs to be executed
+jobs:
+    build-deploy:
+    
+        environment : Production
+        env:
+            Key1: ${{secrets.USERNAME}}
+            Key2: ${{secrets.CONSUMER_KEY}}
+        runs-on: ubuntu-latest
+        steps:
+            # Install Salesforce CLI1
+            - name: 'Install Salesforce CLI'
+              run: |
+                  wget https://developer.salesforce.com/media/salesforce-cli/sfdx/channels/stable/sfdx-linux-x64.tar.xz
+                  mkdir ~/sfdx
+                  tar xJf sfdx-linux-x64.tar.xz -C ~/sfdx --strip-components 1
+                  echo "$HOME/sfdx/bin" >> $GITHUB_PATH
+                  ~/sfdx/bin/sfdx version
+            # Checkout the source code
+            - name: 'Checkout source code'
+              uses: actions/checkout@v2
+            - name: 'Decrypt file'
+              run: openssl enc -nosalt -aes-256-cbc -d -in assets/dev.key.enc -out server.key -base64 -K ${{secrets.DECRYPTION_KEY}} -iv ${{secrets.DECRYPTION_IV}}
+              
+            - name: 'Authorize'
+              run: |
+                sfdx force:auth:jwt:grant --clientid=${{env.Key2}} --username=${{env.Key1}} --jwtkeyfile server.key --instanceurl=https://login.salesforce.com --setalias=devhub
+
+            - name: 'Install app and create delta'
+              run: |
+               echo y | sfdx plugins:install sfdx-git-delta
+               git config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+               git fetch --all
+               git checkout -b pr
+               git --no-pager diff --name-status pr origin/master
+               sfdx sgd:source:delta --to pr --from origin/master --output "."
+               echo "--- package.xml generated with added and modified metadata ---"
+               cat package/package.xml
+               echo
+               echo "---- Deploying added and modified metadata ----"
+              
+              
+        
+            - name: 'Convert Metadata'
+              run: sfdx force:source:convert --manifest=package/package.xml --outputdir=convert
+            - name: 'Run Test on Metadata'
+              run: sfdx force:mdapi:deploy --deploydir=convert --checkonly --testlevel=RunLocalTests -u devhub -w30
+            
